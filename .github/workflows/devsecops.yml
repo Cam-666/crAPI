@@ -1,0 +1,99 @@
+# Pipeline DevSecOps — Compra Fácil Digital S.A.S.
+# Se ejecuta en GitHub Actions (no consume RAM del equipo local).
+# Ubicación: .github/workflows/devsecops.yml dentro del fork de OWASP/crAPI
+name: DevSecOps Compra Facil
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secretos:
+    name: Secretos expuestos (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
+        continue-on-error: true   # la línea base es vulnerable: se reporta, no se detiene
+
+  sast:
+    name: Análisis estático (Semgrep)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          semgrep scan --config p/default --config p/owasp-top-ten \
+            --json --output semgrep.json services/ || true
+          semgrep scan --config p/default --config p/owasp-top-ten services/ \
+            > semgrep.txt || true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reporte-semgrep
+          path: |
+            semgrep.json
+            semgrep.txt
+
+  sca-iac:
+    name: Dependencias y configuración (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Dependencias, secretos y configuración del repositorio
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: CRITICAL,HIGH
+          format: table
+          output: trivy-repositorio.txt
+          exit-code: '0'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reporte-trivy-repositorio
+          path: trivy-repositorio.txt
+
+  imagenes:
+    name: Imágenes de contenedor (Trivy)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        servicio: [crapi-identity, crapi-community, crapi-workshop, crapi-web]
+    steps:
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: crapi/${{ matrix.servicio }}:latest
+          severity: CRITICAL,HIGH
+          format: table
+          output: trivy-${{ matrix.servicio }}.txt
+          exit-code: '0'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: reporte-trivy-${{ matrix.servicio }}
+          path: trivy-${{ matrix.servicio }}.txt
+
+  sbom:
+    name: Inventario de componentes (SBOM con Syft)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        servicio: [crapi-identity, crapi-community, crapi-workshop, crapi-web]
+    steps:
+      - uses: anchore/sbom-action@v0.24.3
+        with:
+          image: crapi/${{ matrix.servicio }}:latest
+          format: spdx-json
+          artifact-name: sbom-${{ matrix.servicio }}.spdx.json
